@@ -1,0 +1,5 @@
+{
+  "name": "Remix: GeoGebra AI Tutor",
+  "description": "Interactive math tutor that converts problems to GeoGebra graphs and provides step-by-step AI guidance.",
+  "requestFramePermissions": []
+}
