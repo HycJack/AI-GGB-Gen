@@ -28,6 +28,7 @@ export interface GeoGebraRef {
   reset: () => void;
   downloadGGB: () => void;
   getPNGBase64: (callback: (data: string) => void) => void;
+  deleteObject: (objName: string) => void;
 }
 
 const GeoGebra = forwardRef<GeoGebraRef, GeoGebraProps>(({ 
@@ -46,8 +47,16 @@ const GeoGebra = forwardRef<GeoGebraRef, GeoGebraProps>(({
 
   useImperativeHandle(ref, () => ({
     executeCommand: (cmd: string) => {
-      if (appletRef.current) {
-        appletRef.current.evalCommand(cmd);
+      if (appletRef.current && isReady) {
+        try {
+          appletRef.current.evalCommand(cmd);
+        } catch (error) {
+          console.error('GeoGebra command execution error:', error);
+          alert(`命令执行失败: ${cmd}\n错误信息: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } else {
+        console.warn('GeoGebra applet not ready yet, command queued:', cmd);
+        alert('GeoGebra 还未加载完成，请稍后再试');
       }
     },
     getCommandString: (objName?: string) => {
@@ -74,7 +83,19 @@ const GeoGebra = forwardRef<GeoGebraRef, GeoGebraProps>(({
     getObjectNumber: () => appletRef.current?.getObjectNumber() || 0,
     getObjectName: (i: number) => appletRef.current?.getObjectName(i) || "",
     getValueString: (objName: string) => appletRef.current?.getValueString(objName) || "",
-    evalCommand: (cmd: string) => appletRef.current?.evalCommand(cmd),
+    evalCommand: (cmd: string) => {
+      if (appletRef.current && isReady) {
+        try {
+          appletRef.current.evalCommand(cmd);
+        } catch (error) {
+          console.error('GeoGebra command execution error:', error);
+          alert(`命令执行失败: ${cmd}\n错误信息: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } else {
+        console.warn('GeoGebra applet not ready yet, command queued:', cmd);
+        alert('GeoGebra 还未加载完成，请稍后再试');
+      }
+    },
     setSize: (width: number, height: number) => {
       if (appletRef.current) {
         appletRef.current.setSize(width, height);
@@ -87,6 +108,17 @@ const GeoGebra = forwardRef<GeoGebraRef, GeoGebraProps>(({
     },
     reset: () => {
       if (appletRef.current) {
+        const objNames = appletRef.current.getAllObjectNames();
+          objNames.forEach((name: string) => {
+            try {
+              appletRef.current.deleteObject(name);
+            } catch (e) {
+              // Ignore errors for objects that can't be deleted
+            }
+          });
+        if (perspective === "G" || perspective === "5") {
+          appletRef.current.setPerspective(perspective);
+        }
         appletRef.current.reset();
       }
     },
@@ -110,6 +142,15 @@ const GeoGebra = forwardRef<GeoGebraRef, GeoGebraProps>(({
         // getPNGBase64(exportScale, transparent, dpi, copyToClipboard, callback)
         // We use a scale of 1, transparent false, default dpi, false for clipboard
         appletRef.current.getPNGBase64(1, false, 300, false, callback);
+      }
+    },
+    deleteObject: (objName: string) => {
+      if (appletRef.current) {
+        try {
+          appletRef.current.deleteObject(objName);
+        } catch (error) {
+          console.error('GeoGebra deleteObject error:', error);
+        }
       }
     }
   }));
@@ -144,10 +185,10 @@ const GeoGebra = forwardRef<GeoGebraRef, GeoGebraProps>(({
         "width": containerRef.current.clientWidth,
         "height": containerRef.current.clientHeight,
         "showToolBar": true,
-        "showAlgebraInput": true,
+        "showAlgebraInput": false,
         "showMenuBar": false,
         "perspective": perspective,
-        "allowStyleBar": true,
+        "allowStyleBar": false,
         "showResetIcon": true,
         "enableLabelDrags": false,
         "enableShiftDragZoom": true,
@@ -157,17 +198,28 @@ const GeoGebra = forwardRef<GeoGebraRef, GeoGebraProps>(({
         "useBrowserForJS": false,
         "appletOnLoad": (api: any) => {
           appletRef.current = api;
-          setIsReady(true);
           
           // Register listeners
           if (onUpdate) api.registerUpdateListener(onUpdate);
           if (onAdd) api.registerAddListener(onAdd);
           if (onRemove) api.registerRemoveListener(onRemove);
 
-          // Execute initial commands
-          if (initialCommands.length > 0) {
-            initialCommands.forEach(cmd => api.evalCommand(cmd));
-          }
+          // Wait a bit for the applet to fully initialize before executing commands
+          setTimeout(() => {
+            setIsReady(true);
+            
+            // Execute initial commands
+            if (initialCommands.length > 0) {
+              initialCommands.forEach(cmd => {
+                try {
+                  api.evalCommand(cmd);
+                } catch (error) {
+                  console.error('GeoGebra command execution error:', error);
+                  alert(`命令执行失败: ${cmd}\n错误信息: ${error instanceof Error ? error.message : String(error)}`);
+                }
+              });
+            }
+          }, 100);
         }
       };
 
@@ -229,7 +281,14 @@ const GeoGebra = forwardRef<GeoGebraRef, GeoGebraProps>(({
       // Or just run once when ready.
       // We'll rely on parent to call executeCommand for updates.
       appletRef.current.reset();
-      initialCommands.forEach(cmd => appletRef.current.evalCommand(cmd));
+      initialCommands.forEach(cmd => {
+        try {
+          appletRef.current.evalCommand(cmd);
+        } catch (error) {
+          console.error('GeoGebra command execution error:', error);
+          alert(`命令执行失败: ${cmd}\n错误信息: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady]); // Only run when applet becomes ready, not when commands change later

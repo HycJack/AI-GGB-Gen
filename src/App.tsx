@@ -1,22 +1,18 @@
 import { useState, useRef, useEffect } from 'react';
-import { Upload, MessageSquare, Calculator, ArrowRight, Loader2, X, Settings, Box, FunctionSquare, Triangle, History, FileText, Coins, LogOut, User as UserIcon, ChevronDown, Download, Sparkles } from 'lucide-react';
+import { Upload, MessageSquare, Calculator, ArrowRight, Loader2, X, Settings, Box, FunctionSquare, Triangle, History, FileText, LogOut, User as UserIcon, Download, Sparkles } from 'lucide-react';
 import GeoGebra, { GeoGebraRef } from './components/GeoGebra';
 import ScriptEditor from './components/ScriptEditor';
 import SettingsModal from './components/SettingsModal';
 import HistoryModal from './components/HistoryModal';
-import AuthPage from './components/AuthPage';
-import UserProfileDropdown from './components/UserProfileModal';
-import { generateGeoGebraCommands, ChatMessage, GeminiConfig } from './lib/gemini';
+import { generateGeoGebraCommands, ChatMessage, OpenAIConfig } from './lib/gemini';
 import { saveSession, updateSession, getSessions, deleteSession, SavedSession } from './lib/storage';
-import { getCurrentUser, loginUser, logoutUser, deductPoints, User } from './lib/user';
 import { cn } from './lib/utils';
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
   const [showInputModal, setShowInputModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
-  const [showProfileDropdown, setShowProfileDropdown] = useState(false);
+  const [isProblemExpanded, setIsProblemExpanded] = useState(false);
   const [problemText, setProblemText] = useState('');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -43,58 +39,24 @@ export default function App() {
       const interval = setInterval(() => {
         index = (index + 1) % loadingTips.length;
         setLoadingTip(loadingTips[index]);
-      }, 2000);
+      }, 10000);
       return () => clearInterval(interval);
     }
   }, [isProcessing]);
 
-  const profileTriggerRef = useRef<HTMLButtonElement>(null);
-
   // Config State
-  const [geminiConfig, setGeminiConfig] = useState<GeminiConfig>({
-    apiKey: process.env.GEMINI_API_KEY || '',
-    baseUrl: 'https://yunwu.ai/v1',
+  const [openAIConfig, setOpenAIConfig] = useState<OpenAIConfig>({
+    apiKey: '',
+    baseUrl: '',
     model: 'gemini-3-flash-preview'
   });
 
   const ggbRef = useRef<GeoGebraRef>(null);
 
-  // Check login status on mount
+  // Load sessions on mount
   useEffect(() => {
-    const currentUser = getCurrentUser();
-    if (currentUser) {
-      setUser(currentUser);
-      setShowInputModal(true);
-    }
     setSessions(getSessions());
   }, []);
-
-  const handleLogin = (username: string, password?: string) => {
-    const { user: loggedInUser, bonus, error } = loginUser(username, password);
-    
-    if (error) {
-      alert(error);
-      return;
-    }
-
-    if (loggedInUser) {
-      setUser(loggedInUser);
-      // Don't auto-open input modal, let user land on dashboard
-      // setShowInputModal(true); 
-      if (bonus) {
-        // Bonus collected silently for smoother UX
-        console.log(`Bonus collected: ${bonus}`);
-      }
-    }
-  };
-
-  const handleLogout = () => {
-    logoutUser();
-    setUser(null);
-    setShowInputModal(false);
-    setShowHistoryModal(false);
-    setShowSettingsModal(false);
-  };
 
   useEffect(() => {
     setSessions(getSessions());
@@ -141,11 +103,49 @@ export default function App() {
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setSelectedImage(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+      processImageFile(file);
+    }
+  };
+
+  const processImageFile = (file: File) => {
+    if (!file.type.startsWith('image/')) {
+      alert('请上传图片文件');
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      alert('文件大小不能超过 10MB');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setSelectedImage(reader.result as string);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const [isDragging, setIsDragging] = useState(false);
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      const file = files[0];
+      processImageFile(file);
     }
   };
 
@@ -210,27 +210,19 @@ export default function App() {
   const handleInitialSubmit = async () => {
     if (!problemText && !selectedImage) return;
 
-    // User check is handled at component level
-    if (!user) return;
-
-    if (user.points < 10) {
-      alert("积分不足！每道题目需要消耗 10 积分。请明天再来领取登录奖励。");
-      return;
-    }
-
-    if (!geminiConfig.apiKey) {
+    if (!openAIConfig.apiKey) {
       alert("Please configure your API Key in settings first.");
       setShowSettingsModal(true);
       return;
     }
 
-    // Deduct points
-    if (deductPoints(10)) {
-      setUser(getCurrentUser()); // Update local state
-    } else {
-      alert("积分扣除失败，请重试。");
-      return;
-    }
+    // Deduct points - disabled
+    // if (deductPoints(10)) {
+    //   setUser(getCurrentUser()); // Update local state
+    // } else {
+    //   alert("积分扣除失败，请重试。");
+    //   return;
+    // }
 
     setIsProcessing(true);
     try {
@@ -244,7 +236,7 @@ export default function App() {
         mimeType = parts[0].match(/:(.*?);/)?.[1];
       }
       
-      const result = await generateGeoGebraCommands(problemText, base64Data, mimeType, geminiConfig);
+      const result = await generateGeoGebraCommands(problemText, base64Data, mimeType, openAIConfig);
       
       const { commands, perspective: newPerspective, problemDescription } = result;
       
@@ -275,7 +267,7 @@ ${commands.join('\n')}
 
       const initialMessages: ChatMessage[] = [
         { 
-          role: 'model', 
+          role: 'assistant', 
           content: initialContent
         }
       ];
@@ -328,107 +320,88 @@ ${commands.join('\n')}
     }
   };
 
-  if (!user) {
-    return <AuthPage onLogin={handleLogin} />;
-  }
-
   return (
     <div className="flex flex-col h-screen bg-gray-50 overflow-hidden">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between shadow-sm z-10 shrink-0">
+      <header className="bg-white border-b border-gray-200 px-6 py-2.5 flex items-center justify-between shadow-sm z-10 shrink-0">
         <div className="flex items-center gap-2">
-          <div className="bg-blue-600 p-2 rounded-lg">
-            <Calculator className="w-6 h-6 text-white" />
+          <div className="bg-blue-600 p-1.5 rounded-lg">
+            <Calculator className="w-5 h-5 text-white" />
           </div>
-          <h1 className="text-xl font-bold text-gray-900">GeoGebra AI Tutor</h1>
+          <h1 className="text-lg font-bold text-gray-900">GeoGebra AI Tutor</h1>
         </div>
         
         {/* Perspective Switcher */}
-        <div className="flex bg-gray-100 p-1 rounded-lg">
+        <div className="flex bg-gray-100 p-0.5 rounded-lg">
           <button
             onClick={() => setPerspective("1")}
             className={cn(
-              "p-2 rounded-md transition-all flex items-center gap-2 text-sm font-medium",
+              "px-2 py-1 rounded-md transition-all flex items-center gap-1.5 text-xs font-medium",
               perspective === "1" ? "bg-white text-blue-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
             )}
             title="函数/代数 (Algebra & Graphics)"
           >
-            <FunctionSquare className="w-4 h-4" />
+            <FunctionSquare className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">函数</span>
           </button>
           <button
             onClick={() => setPerspective("2")}
             className={cn(
-              "p-2 rounded-md transition-all flex items-center gap-2 text-sm font-medium",
+              "px-2 py-1 rounded-md transition-all flex items-center gap-1.5 text-xs font-medium",
               perspective === "2" ? "bg-white text-blue-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
             )}
             title="平面几何 (Geometry)"
           >
-            <Triangle className="w-4 h-4" />
+            <Triangle className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">平面</span>
           </button>
           <button
             onClick={() => setPerspective("5")}
             className={cn(
-              "p-2 rounded-md transition-all flex items-center gap-2 text-sm font-medium",
+              "px-2 py-1 rounded-md transition-all flex items-center gap-1.5 text-xs font-medium",
               perspective === "5" ? "bg-white text-blue-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
             )}
             title="立体几何 (3D Graphics)"
           >
-            <Box className="w-4 h-4" />
+            <Box className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">立体</span>
           </button>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          <button 
+            onClick={() => {
+              setShowInputModal(true);
+            }}
+            className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 shadow-sm"
+          >
+            <Calculator className="w-3.5 h-3.5" />
+            新题目
+          </button>
+          
           <button
             onClick={() => setShowHistoryModal(true)}
-            className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-full transition-colors"
+            className="p-1.5 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-full transition-colors"
             title="历史记录"
           >
-            <History className="w-5 h-5" />
+            <History className="w-4 h-4" />
           </button>
           
           <button
             onClick={() => ggbRef.current?.downloadGGB()}
-            className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-full transition-colors"
+            className="p-1.5 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-full transition-colors"
             title="下载 .ggb 文件"
           >
-            <Download className="w-5 h-5" />
+            <Download className="w-4 h-4" />
           </button>
           
-          <button 
-            onClick={() => {
-              setCurrentSessionId(null);
-              setMessages([]);
-              setGgbCommands([]);
-              setProblemText('');
-              setShowInputModal(true);
-            }}
-            className="text-sm text-blue-600 hover:text-blue-700 font-medium px-3 py-1.5 hover:bg-blue-50 rounded-lg transition-colors"
+          <button
+            onClick={() => setShowSettingsModal(true)}
+            className="p-1.5 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-full transition-colors"
+            title="模型配置"
           >
-            新题目
+            <Settings className="w-4 h-4" />
           </button>
-
-          {user && (
-            <button
-              ref={profileTriggerRef}
-              onClick={() => setShowProfileDropdown(!showProfileDropdown)}
-              className={cn(
-                "flex items-center gap-2 pl-1 pr-2 py-1 rounded-full transition-all group border",
-                showProfileDropdown ? "bg-blue-50 border-blue-200" : "bg-white border-gray-200 hover:bg-gray-50 hover:border-gray-300"
-              )}
-              title="我的信息"
-            >
-              <div className="w-7 h-7 bg-blue-600 rounded-full flex items-center justify-center text-white text-xs font-bold">
-                {user.username.charAt(0).toUpperCase()}
-              </div>
-              <span className="text-sm font-medium text-gray-700 group-hover:text-gray-900 max-w-[80px] truncate">
-                {user.username}
-              </span>
-              <ChevronDown className={cn("w-3 h-3 text-gray-400 transition-transform", showProfileDropdown && "rotate-180")} />
-            </button>
-          )}
         </div>
       </header>
 
@@ -438,12 +411,36 @@ ${commands.join('\n')}
         <div className="flex-1 bg-white p-4 overflow-hidden relative flex flex-col gap-4">
           {/* Problem Description Area */}
           {problemText && (
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 shrink-0 max-h-[200px] overflow-y-auto">
+            <div className={cn(
+              "bg-white rounded-xl border border-gray-200 shadow-sm p-3 shrink-0 transition-all duration-300",
+              isProblemExpanded ? "max-h-[500px]" : "max-h-[100px]"
+            )}>
               <div className="flex items-center gap-2 mb-2 text-gray-900 font-medium">
                 <FileText className="w-4 h-4 text-blue-600" />
                 <span>题目描述</span>
               </div>
-              <p className="text-sm text-gray-600 whitespace-pre-wrap">{problemText}</p>
+              <div className="relative">
+                <p className={cn(
+                  "text-sm text-gray-600 whitespace-pre-wrap transition-all duration-300",
+                  isProblemExpanded ? "" : "line-clamp-3"
+                )}>{problemText}</p>
+                {!isProblemExpanded && problemText.split('\n').length > 3 && (
+                  <button
+                    onClick={() => setIsProblemExpanded(true)}
+                    className="absolute bottom-0 right-0 text-xs text-blue-600 hover:text-blue-700 font-medium bg-gradient-to-l from-transparent via-white to-white pl-4 py-1 transition-colors"
+                  >
+                    展开全部
+                  </button>
+                )}
+                {isProblemExpanded && (
+                  <button
+                    onClick={() => setIsProblemExpanded(false)}
+                    className="text-xs text-blue-600 hover:text-blue-700 font-medium mt-2 transition-colors"
+                  >
+                    收起
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
@@ -475,8 +472,19 @@ ${commands.join('\n')}
           <div className="flex-1 overflow-hidden min-h-0">
             <ScriptEditor 
               initialCode={ggbCommands}
-              onSave={setGgbCommands}
-              geminiConfig={geminiConfig}
+              onSave={(commands) => {
+                setGgbCommands(commands);
+                // Immediately update session if exists
+                if (currentSessionId) {
+                  updateSession(currentSessionId, {
+                    messages,
+                    ggbCommands: commands,
+                    perspective,
+                    problemText
+                  });
+                }
+              }}
+              geminiConfig={openAIConfig}
               onExecute={(cmds) => {
                 cmds.forEach(cmd => {
                   if (cmd.trim()) {
@@ -486,6 +494,17 @@ ${commands.join('\n')}
               }}
               onReset={() => {
                 if (ggbRef.current) {
+                  if (perspective === "G" || perspective === "5") {
+                    const objNames = ggbRef.current.getAllObjectNames();
+                    objNames.forEach((name: string) => {
+                      try {
+                        ggbRef.current.deleteObject(name);
+                      } catch (e) {
+                        // Ignore errors for objects that can't be deleted
+                      }
+                    });
+                    ggbRef.current.setPerspective(perspective);
+                  }
                   ggbRef.current.reset();
                   setTimeout(() => {
                     if (ggbRef.current && perspective) {
@@ -504,10 +523,10 @@ ${commands.join('\n')}
       <SettingsModal 
         isOpen={showSettingsModal}
         onClose={() => setShowSettingsModal(false)}
-        apiKey={geminiConfig.apiKey}
-        baseUrl={geminiConfig.baseUrl || ''}
-        model={geminiConfig.model}
-        onSave={(apiKey, baseUrl, model) => setGeminiConfig({ apiKey, baseUrl, model })}
+        apiKey={openAIConfig.apiKey}
+        baseUrl={openAIConfig.baseUrl || ''}
+        model={openAIConfig.model}
+        onSave={(apiKey, baseUrl, model) => setOpenAIConfig({ apiKey, baseUrl, model })}
       />
 
       {/* History Modal */}
@@ -519,20 +538,10 @@ ${commands.join('\n')}
         onDeleteSession={handleDeleteSession}
       />
 
-      {/* User Profile Dropdown */}
-      <UserProfileDropdown
-        isOpen={showProfileDropdown}
-        onClose={() => setShowProfileDropdown(false)}
-        user={user}
-        onLogout={handleLogout}
-        onOpenSettings={() => setShowSettingsModal(true)}
-        triggerRef={profileTriggerRef}
-      />
-
       {/* Input Modal */}
       {showInputModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden relative">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowInputModal(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden relative" onClick={(e) => e.stopPropagation()}>
             
             {isProcessing && (
               <div className="absolute inset-0 z-10 bg-white/90 backdrop-blur-sm flex flex-col items-center justify-center p-8 text-center">
@@ -549,20 +558,14 @@ ${commands.join('\n')}
               </div>
             )}
 
-            <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+            <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50 shrink-0">
               <h2 className="text-xl font-bold text-gray-900">开始新题目</h2>
-              <div className="flex items-center gap-2">
-                 <div className="bg-orange-50 text-orange-700 px-2 py-1 rounded text-xs font-medium flex items-center gap-1">
-                   <Coins className="w-3 h-3" />
-                   消耗 10 积分
-                 </div>
-                <button onClick={() => setShowInputModal(false)} className="text-gray-400 hover:text-gray-600">
-                  <X className="w-6 h-6" />
-                </button>
-              </div>
+              <button onClick={() => setShowInputModal(false)} className="text-gray-400 hover:text-gray-600">
+                <X className="w-6 h-6" />
+              </button>
             </div>
             
-            <div className="p-6 space-y-6">
+            <div className="p-6 space-y-6 flex-1 overflow-y-auto">
               {/* Image Upload - Primary */}
               <div>
                 <label className="block text-base font-semibold text-gray-900 mb-2 flex items-center gap-2">
@@ -571,7 +574,17 @@ ${commands.join('\n')}
                   </div>
                   上传题目图片 (推荐)
                 </label>
-                <div className="mt-1 flex justify-center px-6 pt-8 pb-8 border-2 border-blue-100 border-dashed rounded-2xl hover:bg-blue-50/50 hover:border-blue-300 transition-all cursor-pointer relative group bg-gray-50/30">
+                <div 
+                  className={cn(
+                    "mt-1 flex justify-center px-6 pt-8 pb-8 border-2 border-dashed rounded-2xl transition-all cursor-pointer relative group bg-gray-50/30",
+                    isDragging 
+                      ? "border-blue-500 bg-blue-100/50 scale-[1.02]" 
+                      : "border-blue-100 hover:bg-blue-50/50 hover:border-blue-300"
+                  )}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                >
                   <div className="space-y-2 text-center w-full">
                     {selectedImage ? (
                       <div className="relative inline-block">
@@ -588,10 +601,15 @@ ${commands.join('\n')}
                       </div>
                     ) : (
                       <label htmlFor="file-upload" className="cursor-pointer flex flex-col items-center w-full h-full">
-                        <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                          <Upload className="h-8 w-8 text-blue-600" />
+                        <div className={cn(
+                          "w-16 h-16 rounded-full flex items-center justify-center mb-4 transition-transform",
+                          isDragging ? "bg-blue-500 scale-110" : "bg-blue-100 group-hover:scale-110"
+                        )}>
+                          <Upload className={cn("h-8 w-8", isDragging ? "text-white" : "text-blue-600")} />
                         </div>
-                        <div className="text-lg font-medium text-gray-900">点击上传图片</div>
+                        <div className="text-lg font-medium text-gray-900">
+                          {isDragging ? '松开以上传图片' : '点击上传图片'}
+                        </div>
                         <p className="text-sm text-gray-500 mt-1">或将图片拖拽至此处</p>
                         <p className="text-xs text-gray-400 mt-4">支持 PNG, JPG, GIF (最大 10MB)</p>
                         <input id="file-upload" name="file-upload" type="file" className="sr-only" accept="image/*" onChange={handleImageUpload} />
@@ -618,7 +636,7 @@ ${commands.join('\n')}
               </div>
             </div>
 
-            <div className="p-6 bg-gray-50 border-t border-gray-100 flex justify-end">
+            <div className="p-6 bg-gray-50 border-t border-gray-100 flex justify-end shrink-0">
               <button
                 onClick={handleInitialSubmit}
                 disabled={(!problemText && !selectedImage) || isProcessing}

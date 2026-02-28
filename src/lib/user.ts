@@ -1,7 +1,7 @@
 export interface User {
   username: string;
   password?: string; // Optional for backward compatibility or if we want to allow guest mode later
-  points: number;
+  points: number; // Points system - disabled but kept for data structure
   lastLoginDate: string;
 }
 
@@ -41,7 +41,7 @@ export function loginUser(username: string, password?: string): LoginResult {
     user = {
       username,
       password,
-      points: 50,
+      points: 50, // Initial points - disabled
       lastLoginDate: today
     };
   } else {
@@ -52,12 +52,12 @@ export function loginUser(username: string, password?: string): LoginResult {
     // If user has no password (legacy), we might want to set it, but for now let's just allow login or require update.
     // Assuming all new users will have passwords. 
     
-    // Check daily login
-    if (user.lastLoginDate !== today) {
-      user.points += 10;
-      user.lastLoginDate = today;
-      bonus = true;
-    }
+    // Check daily login - disabled
+    // if (user.lastLoginDate !== today) {
+    //   user.points += 10;
+    //   user.lastLoginDate = today;
+    //   bonus = true;
+    // }
   }
 
   saveUser(user);
@@ -65,18 +65,19 @@ export function loginUser(username: string, password?: string): LoginResult {
   return { user, bonus };
 }
 
-export function deductPoints(amount: number): boolean {
-  const user = getCurrentUser();
-  if (!user) return false;
+// Points deduction function - disabled
+// export function deductPoints(amount: number): boolean {
+//   const user = getCurrentUser();
+//   if (!user) return false;
 
-  if (user.points >= amount) {
-    user.points -= amount;
-    saveUser(user);
-    localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(user));
-    return true;
-  }
-  return false;
-}
+//   if (user.points >= amount) {
+//     user.points -= amount;
+//     saveUser(user);
+//     localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(user));
+//     return true;
+//   }
+//   return false;
+// }
 
 function getUsers(): Record<string, User> {
   try {

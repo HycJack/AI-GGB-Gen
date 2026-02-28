@@ -157,7 +157,7 @@ export default function ChatInterface({ messages, onSendMessage, onExecuteComman
                 key={index}
                 className={cn(
                   "w-full px-4 py-6 border-b border-black/5",
-                  msg.role === 'model' ? "bg-gray-50/50" : "bg-white"
+                  msg.role === 'assistant' ? "bg-gray-50/50" : "bg-white"
                 )}
               >
                 <div className="max-w-3xl mx-auto flex gap-4 md:gap-6">
@@ -165,9 +165,9 @@ export default function ChatInterface({ messages, onSendMessage, onExecuteComman
                   <div className="flex-shrink-0 flex flex-col relative items-end">
                     <div className={cn(
                       "w-8 h-8 rounded-sm flex items-center justify-center",
-                      msg.role === 'model' ? "bg-green-500" : "bg-purple-600"
+                      msg.role === 'assistant' ? "bg-green-500" : "bg-purple-600"
                     )}>
-                      {msg.role === 'model' ? (
+                      {msg.role === 'assistant' ? (
                         <Sparkles className="w-5 h-5 text-white" />
                       ) : (
                         <User className="w-5 h-5 text-white" />
@@ -178,7 +178,7 @@ export default function ChatInterface({ messages, onSendMessage, onExecuteComman
                   {/* Content */}
                   <div className="relative flex-1 overflow-hidden">
                     <div className="font-semibold text-sm mb-1 opacity-90">
-                      {msg.role === 'model' ? 'AI Tutor' : 'You'}
+                      {msg.role === 'assistant' ? 'AI Tutor' : 'You'}
                     </div>
                     <div className="prose prose-slate max-w-none prose-p:leading-relaxed prose-pre:p-0 prose-pre:bg-transparent">
                       <ReactMarkdown 

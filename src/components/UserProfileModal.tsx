@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { User, LogOut, Settings, Coins, X, ChevronRight, ChevronDown } from 'lucide-react';
+import { User, LogOut, X, ChevronRight, ChevronDown } from 'lucide-react';
 import { User as UserType } from '../lib/user';
 import { cn } from '../lib/utils';
 
@@ -8,7 +8,6 @@ interface UserProfileDropdownProps {
   onClose: () => void;
   user: UserType | null;
   onLogout: () => void;
-  onOpenSettings: () => void;
   triggerRef: React.RefObject<HTMLButtonElement>;
 }
 
@@ -17,7 +16,6 @@ export default function UserProfileDropdown({
   onClose, 
   user, 
   onLogout,
-  onOpenSettings,
   triggerRef
 }: UserProfileDropdownProps) {
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -63,8 +61,8 @@ export default function UserProfileDropdown({
       </div>
       
       <div className="p-2">
-        {/* Points Card */}
-        <div className="bg-orange-50 border border-orange-100 rounded-lg p-3 mb-2">
+        {/* Points Card - disabled */}
+        {/* <div className="bg-orange-50 border border-orange-100 rounded-lg p-3 mb-2">
           <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-2">
               <Coins className="w-4 h-4 text-orange-600" />
@@ -76,23 +74,10 @@ export default function UserProfileDropdown({
             <span>每日登录 +10</span>
             <span>每题消耗 -10</span>
           </div>
-        </div>
+        </div> */}
 
         {/* Menu Items */}
         <div className="space-y-1">
-          <button 
-            onClick={() => {
-              onOpenSettings();
-              onClose();
-            }}
-            className="w-full flex items-center gap-3 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
-          >
-            <Settings className="w-4 h-4" />
-            模型配置
-          </button>
-
-          <div className="h-px bg-gray-100 my-1" />
-
           <button 
             onClick={() => {
               onLogout();

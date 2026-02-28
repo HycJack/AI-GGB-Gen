@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Pause, Save, RotateCcw, FileText, Wand2, X, Loader2 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { GeminiConfig, modifyGeoGebraCommands } from '../lib/gemini';
+import { OpenAIConfig, modifyGeoGebraCommands } from '../lib/gemini';
 
 interface ScriptEditorProps {
   initialCode: string[];
@@ -9,7 +9,7 @@ interface ScriptEditorProps {
   onExecute: (commands: string[]) => void;
   onReset: () => void;
   className?: string;
-  geminiConfig?: GeminiConfig;
+  geminiConfig?: OpenAIConfig;
 }
 
 export default function ScriptEditor({ 
@@ -157,7 +157,13 @@ export default function ScriptEditor({
       const updatedCode = before + newText + after;
       
       setCode(updatedCode);
-      setIsDirty(true);
+      
+      // Immediately save the updated code
+      const commands = updatedCode.split('\n').filter(line => line.trim() !== '');
+      onSave(commands);
+      lastSavedCodeRef.current = updatedCode;
+      setIsDirty(false);
+      
       setShowAiInput(false);
       setAiInstruction('');
       setSelectionRange(null);
@@ -198,6 +204,18 @@ export default function ScriptEditor({
                 执行
               </>
             )}
+          </button>
+          <button
+            onClick={() => {
+              onReset();
+              const lines = code.split('\n').filter(line => line.trim() !== '');
+              onExecute(lines);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium bg-blue-100 text-blue-700 hover:bg-blue-200 transition-colors"
+            title="批量执行所有指令"
+          >
+            <Play className="w-4 h-4" />
+            批量执行
           </button>
           <button
             onClick={() => {
