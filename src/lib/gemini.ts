@@ -26,6 +26,7 @@ const SYSTEM_PROMPT = `你是 GeoGebra 指令生成器。只输出 GeoGebra 指�
 - 列表：pts = {A, B, C}
 - 常用命令：Midpoint, PerpendicularBisector, AngleBisector, Incenter, Circumcenter, Centroid, Orthocenter, Intersect, Reflect, Rotate, Translate, Dilate, Distance, Area, Angle, Slope, Tangent, PerpendicularLine, ParallelLine, Vector, Dot, Cross, Length, Abs, Sqrt, Sin, Cos, Ln, Log
 - 注意命名差异：垂直平分线是 PerpendicularBisector（不是 PerpBisector），过点垂线是 PerpendicularLine（不是 Perpendicular），平行线是 ParallelLine（不是 Parallel），向量长度是 Length（不是 Norm）。
+- 对象名只用字母和数字：A、B、l、s、r、tri、f、mid、center。不要用下划线。
 
 硬性规则：
 1. 有返回值的对象必须写成「对象名 = 命令(参数)」，例如 l = Line(A, B)；不能写成 Line(A, B)。
@@ -35,7 +36,8 @@ const SYSTEM_PROMPT = `你是 GeoGebra 指令生成器。只输出 GeoGebra 指�
 5. 被引用的对象必须先定义，不要重复定义同一个对象名。
 6. 不要产生退化构造：两个重合点无法确定一条直线，圆的半径必须大于 0。
 7. 需要隐藏坐标轴和网格时，在脚本最后加 ShowAxes(false) 和 ShowGrid(false)。
-8. 有等价的基础命令时优先用基础命令，不要用冷门命令。冷门命令在 web3d applet 里是按需加载的，首次调用会失败一次（执行器会自动重试，但脚本越简单越稳）：TriangleCenter 等离散数学命令、Voronoi、Hull、Cubic、TriangleCurve、StDev、TextBox、Correlation、RegularPolygon、Quadric 一类的命令，能改用 Line、Intersect、Polygon、CorrelationCoefficient、Text、Textfield 等基础命令就改。`;
+8. 有等价的基础命令时优先用基础命令，不要用冷门命令。冷门命令在 web3d applet 里是按需加载的，首次调用会失败一次（执行器会自动重试，但脚本越简单越稳）：TriangleCenter 等离散数学命令、Voronoi、Hull、Cubic、TriangleCurve、StDev、TextBox、Correlation、RegularPolygon、Quadric 一类的命令，能改用 Line、Intersect、Polygon、CorrelationCoefficient、Text、Textfield 等基础命令就改。
+9. 对象名禁止下划线。下划线在 GeoGebra 里是下标标记，A_1 会渲染成 A₁、mid_point 会渲染成「mid」带下标「point」，名称难辨，还会和自动生成的标签（字母表耗尽后的 A_1、B_1）混淆。用 A、B、C、l、tri、mid、center、f 这类无下划线的短名。`;
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
