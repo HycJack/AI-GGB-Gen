@@ -1,7 +1,7 @@
 // Binding to the ggbcheck validator, compiled to WebAssembly from
 // github.com/hycjack/geogebra-dsl-go (cmd/ggbcheck-wasm). It runs the full
 // GeoGebra instruction pipeline — syntax, signature, dependency graph, cycle,
-// degeneracy and reachability — entirely in the browser, with the 582-command
+// degeneracy and reachability — entirely in the browser, with the 587-command
 // official command table embedded in the module.
 //
 // The Go side is synchronous, so a validation call blocks the main thread for a
