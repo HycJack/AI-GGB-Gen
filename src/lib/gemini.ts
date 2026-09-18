@@ -1,50 +1,138 @@
-export interface ChatMessage {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
+import {
+  formatProblems,
+  perspectiveFor,
+  validateScript,
+  type GGBProblem,
+  type GGBReceipt,
+} from './ggbValidate';
+
+// The model is asked for commands only, then the GeoGebra script is validated
+// by ggbcheck (compiled to WebAssembly, see ggbValidate.ts) and, when it fails,
+// the diagnostics are fed back for a corrected rewrite. The loop stops on the
+// first script that passes, or after MAX_ATTEMPTS whichever comes first.
+const MAX_ATTEMPTS = 3;
+
+const SYSTEM_PROMPT = `你是 GeoGebra 指令生成器。只输出 GeoGebra 指令脚本本身。不要输出解释、分析、标题、编号、Markdown 代码围栏或任何非指令文本。
+
+语法：每行一条，形式为「对象名 = 定义」。
+- 点：A = (0, 2)          三维点：A = (1, 2, 3)
+- 直线：l = Line(A, B)
+- 线段：s = Segment(A, B)
+- 射线：r = Ray(A, B)
+- 圆：c = Circle(A, 3)
+- 多边形：tri = Polygon(A, B, C)
+- 函数：f(x) = 2x + 1
+- 数字：r = 3.5
+- 列表：pts = {A, B, C}
+- 常用命令：Midpoint, PerpendicularBisector, AngleBisector, Incenter, Circumcenter, Centroid, Orthocenter, Intersect, Reflect, Rotate, Translate, Dilate, Distance, Area, Angle, Slope, Tangent, PerpendicularLine, ParallelLine, Vector, Dot, Cross, Length, Abs, Sqrt, Sin, Cos, Ln, Log
+- 注意命名差异：垂直平分线是 PerpendicularBisector（不是 PerpBisector），过点垂线是 PerpendicularLine（不是 Perpendicular），平行线是 ParallelLine（不是 Parallel），向量长度是 Length（不是 Norm）。
+
+硬性规则：
+1. 有返回值的对象必须写成「对象名 = 命令(参数)」，例如 l = Line(A, B)；不能写成 Line(A, B)。
+2. 只有绘图修饰类命令可以不带等号，例如 ShowAxes(false)、ShowGrid(false)、SetLineStyle(l, 1)、ShowLabel(A, false)。
+3. 点的坐标必须用圆括号字面量 A = (0, 2)，不要写成 A = Point(0, 2)。
+4. 只使用官方 GeoGebra 命令，参数个数与类型必须与官方签名一致。
+5. 被引用的对象必须先定义，不要重复定义同一个对象名。
+6. 不要产生退化构造：两个重合点无法确定一条直线，圆的半径必须大于 0。
+7. 需要隐藏坐标轴和网格时，在脚本最后加 ShowAxes(false) 和 ShowGrid(false)。
+8. 有等价的基础命令时优先用基础命令，不要用冷门命令。冷门命令在 web3d applet 里是按需加载的，首次调用会失败一次（执行器会自动重试，但脚本越简单越稳）：TriangleCenter 等离散数学命令、Voronoi、Hull、Cubic、TriangleCurve、StDev、TextBox、Correlation、RegularPolygon、Quadric 一类的命令，能改用 Line、Intersect、Polygon、CorrelationCoefficient、Text、Textfield 等基础命令就改。`;
+
+const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
+
+/**
+ * The app starts with an empty baseUrl, which previously made /chat/completions
+ * resolve against the app's own origin while /models fell back to OpenAI — two
+ * different hosts for the same key. Both paths now resolve the same way.
+ * Trailing slashes are trimmed so a typed "…/v1/" does not produce "…/v1//chat/completions".
+ */
+function resolveBaseUrl(config: OpenAIConfig): string {
+  return config.baseUrl.trim().replace(/\/+$/, '') || DEFAULT_BASE_URL;
 }
 
 export interface OpenAIConfig {
   apiKey: string;
-  baseUrl?: string;
+  baseUrl: string;
   model: string;
 }
 
-const DEFAULT_BASE_URL = "https://api.openai.com/v1";
+export type Perspective = '1' | '2' | '5';
 
-async function makeOpenAIRequest(
-  endpoint: string,
-  config: OpenAIConfig
-): Promise<Response> {
-  const baseUrl = config.baseUrl || DEFAULT_BASE_URL;
-  const url = `${baseUrl}${endpoint}`;
-  
+type ChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+/** Conversational message shape shared with the UI and session storage. */
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+type ChatRequestMessage =
+  | { role: 'system'; content: string }
+  | { role: 'user'; content: string | ChatContentPart[] }
+  | { role: 'assistant'; content: string };
+
+/** One attempt of the generate → validate → repair loop. */
+export interface ValidationRound {
+  attempt: number;
+  ok: boolean;
+  commands: string[];
+  errors: GGBProblem[];
+}
+
+export interface ValidationReport {
+  ok: boolean;
+  attempts: number;
+  errors: GGBProblem[];
+  /** Object ids in topological build order (empty when the script failed). */
+  executable: string[];
+  rounds: ValidationRound[];
+  /** True when the validator could not be loaded and no checking happened. */
+  unavailable: boolean;
+}
+
+export interface GeoGebraGenerationResult {
+  commands: string[];
+  perspective: Perspective;
+  validation: ValidationReport;
+}
+
+/** Result of an AI modification: the replacement lines plus the receipt for
+ *  the merged script, which is what was actually validated. */
+export interface GeoGebraModificationResult {
+  fragment: string[];
+  validation: ValidationReport;
+}
+
+export async function makeOpenAIRequest(endpoint: string, config: OpenAIConfig): Promise<Response> {
+  // No Content-Type header: a GET with one is not a "simple request", so the
+  // browser would fire a CORS preflight just to list models.
+  const url = `${resolveBaseUrl(config)}${endpoint}`;
+
   const response = await fetch(url, {
     method: 'GET',
     headers: {
       'Authorization': `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/json',
     },
   });
-  
+
   return response;
 }
 
-async function makeOpenAIChatRequest(
-  messages: ChatMessage[],
+export async function makeOpenAIChatRequest(
+  messages: ChatRequestMessage[],
   config: OpenAIConfig,
-  options?: {
-    responseFormat?: { type: 'json_object' | 'text' };
-    temperature?: number;
-  }
+  options?: { temperature?: number; maxTokens?: number; responseFormat?: { type: string } }
 ): Promise<string> {
-  const baseUrl = config.baseUrl || DEFAULT_BASE_URL;
-  const url = `${baseUrl}/chat/completions`;
-  
-  const body: Record<string, any> = {
+  const url = `${resolveBaseUrl(config)}/chat/completions`;
+  const body: any = {
     model: config.model,
     messages: messages,
   };
   
+  if (options?.maxTokens) {
+    body.max_tokens = options.maxTokens;
+  }
   if (options?.responseFormat) {
     body.response_format = options.responseFormat;
   }
@@ -63,7 +151,7 @@ async function makeOpenAIChatRequest(
   
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
+    throw new Error(`大模型服务返回 ${response.status}: ${errorText.slice(0, 300)}`);
   }
   
   const data = await response.json();
@@ -72,7 +160,7 @@ async function makeOpenAIChatRequest(
 
 export async function getAvailableModels(apiKey: string, baseUrl?: string): Promise<string[]> {
   try {
-    const config: OpenAIConfig = { apiKey, baseUrl: baseUrl || DEFAULT_BASE_URL, model: '' };
+    const config: OpenAIConfig = { apiKey, baseUrl: baseUrl || '', model: '' };
     const response = await makeOpenAIRequest('/models', config);
     
     if (!response.ok) {
@@ -98,142 +186,215 @@ export async function getAvailableModels(apiKey: string, baseUrl?: string): Prom
   }
 }
 
-export interface GeoGebraGenerationResult {
-  commands: string[];
-  perspective: string;
-  problemDescription: string;
-}
-
 export async function generateGeoGebraCommands(
-  problemText: string, 
-  imageBase64: string | undefined, 
+  problemText: string,
+  imageBase64: string | undefined,
   mimeType: string = "image/jpeg",
   config: OpenAIConfig
 ): Promise<GeoGebraGenerationResult> {
-  const systemPrompt = `
-    **角色设定**  
-    你是一位精通 GeoGebra 平面几何和立体几何构造的专家。
-      
-    **任务要求**  
-    用户会提供几何题或配图描述。你必须分析题目，提取题目描述，判断题目类型（2D/3D），并生成 GeoGebra 指令。
-
-    **输出格式**
-    请直接输出一个标准的 JSON 对象，不要包含 Markdown 格式标记（如 \`\`\`json ... \`\`\`）。JSON 结构如下：
-    {
-      "problemDescription": "这里是提取或优化的题目文本描述，如果用户提供了图片，请详细描述图片中的几何图形、已知条件和求解目标。",
-      "perspective": "2", // "1": 代数/函数, "2": 平面几何, "5": 立体几何
-      "commands": [
-        "A = (0, 0)",
-        "B = (2, 0)",
-        "Segment(A, B)"
-      ]
-    }
-
-    **GeoGebra 指令生成规则**  
-    1. **只输出命令**：每条指令必须是合法的 GeoGebra 英文命令。
-    2. **几何构造**：
-        - **平面几何（2D）**：使用 坐标。常用：Point, Segment, Circle, Polygon 等。
-        - **立体几何（3D）**：使用 坐标。常用：Point(x,y,z), Plane, Sphere, Polygon3D 等。
-    3. **标签与显示**：
-        - 使用 ShowLabel 控制标签。
-        - 使用 ShowAxes(false) 和 ShowGrid(false) 隐藏坐标轴和网格（除非题目需要）。
-    4. **准确性**：指令必须能复现题目图形。
-  `;
-
-  const messages: ChatMessage[] = [
-    { role: 'system', content: systemPrompt },
-  ];
-
-  const userContent: any[] = [{ type: 'text', text: problemText }];
-
+  const userContent: ChatContentPart[] = [{ type: 'text', text: problemText }];
   if (imageBase64) {
     userContent.push({
       type: 'image_url',
-      image_url: {
-        url: `data:${mimeType};base64,${imageBase64}`
-      }
+      image_url: { url: `data:${mimeType};base64,${imageBase64}` },
     });
   }
 
   try {
-    const response = await makeOpenAIChatRequest(
-      [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userContent as any },
-      ],
-      config,
-      { responseFormat: { type: 'json_object' } }
-    );
-    
-    const result = JSON.parse(response);
-    
+    const { script, receipt, report } = await runValidationLoop(userContent, config);
     return {
-      commands: Array.isArray(result.commands) ? result.commands : [],
-      perspective: result.perspective || "2",
-      problemDescription: result.problemDescription || problemText || "未提供题目描述"
+      commands: script,
+      perspective: perspectiveFor(receipt, script),
+      validation: report,
     };
   } catch (error) {
-    console.error("Error generating GeoGebra commands:", error);
-    return {
-      commands: [],
-      perspective: "2",
-      problemDescription: problemText || "解析失败，请重试。"
-    };
+    // Re-throw so callers can tell a real failure apart from an empty result.
+    throw new Error(
+      `生成 GeoGebra 指令失败: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 }
 
+/**
+ * AI modification of a selected fragment. `contextBefore` and `contextAfter`
+ * are the script text outside the selection: the fragment is validated inside
+ * that context, because references to objects defined elsewhere would
+ * otherwise look undefined.
+ */
 export async function modifyGeoGebraCommands(
-  fullScript: string[],
+  contextBefore: string,
+  contextAfter: string,
   selectedScript: string,
   userInstruction: string,
   config: OpenAIConfig
-): Promise<string[]> {
-  const systemPrompt = `
-    **Role**
-    You are a GeoGebra expert.
-    
-    **Task**
-    Modify the selected GeoGebra commands based on the user's instruction.
-    Ensure the new commands are valid and fit within the context of the full script.
-    
-    **Output Format**
-    Return ONLY a JSON object:
+): Promise<GeoGebraModificationResult> {
+  const fullScript = [contextBefore, selectedScript, contextAfter]
+    .filter((part) => part.trim() !== '')
+    .join('\n');
+
+  const userContent: ChatContentPart[] = [
     {
-      "newCommands": ["cmd1", "cmd2", ...]
-    }
-    
-    **Rules**
-    1. Only output valid GeoGebra commands.
-    2. If the instruction implies deleting, return an empty array or comments.
-    3. Maintain the logic of the construction.
-  `;
-  
-  const userPrompt = `
-    **Full Script Context:**
-    ${fullScript.join('\n')}
-    
-    **Selected Commands to Modify:**
-    ${selectedScript}
-    
-    **User Instruction:**
-    ${userInstruction}
-  `;
+      type: 'text',
+      text: [
+        `当前 GeoGebra 脚本：`,
+        fullScript,
+        '',
+        `其中需要修改的部分：`,
+        selectedScript,
+        '',
+        `用户修改要求：${userInstruction}`,
+        '',
+        '只输出修改后的脚本片段，用于原样替换上面「需要修改的部分」。',
+        '片段里的对象名必须与当前脚本保持一致，对外部对象的引用不要改变。',
+      ].join('\n'),
+    },
+  ];
 
   try {
-    const response = await makeOpenAIChatRequest(
-      [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      config,
-      { responseFormat: { type: 'json_object' } }
-    );
-    
-    const result = JSON.parse(response);
-    
-    return Array.isArray(result.newCommands) ? result.newCommands : [];
+    const { script, report } = await runValidationLoop(userContent, config, {
+      buildFull: (fragment) =>
+        `${contextBefore.trimEnd()}\n${fragment.join('\n')}\n${contextAfter.trimStart()}`.trim(),
+    });
+    return { fragment: script, validation: report };
   } catch (error) {
-    console.error("Error modifying GeoGebra commands:", error);
-    throw error;
+    throw new Error(
+      `AI 修改指令失败: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
+}
+
+/**
+ * Generate → validate → repair. The conversation grows by one assistant turn
+ * and one diagnostics turn per failed attempt, so the model sees its own
+ * previous output alongside what the validator found wrong with it.
+ */
+async function runValidationLoop(
+  firstUser: ChatContentPart[],
+  config: OpenAIConfig,
+  opts?: { buildFull?: (fragment: string[]) => string }
+): Promise<{ script: string[]; receipt: GGBReceipt; report: ValidationReport }> {
+  const messages: ChatRequestMessage[] = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'user', content: firstUser },
+  ];
+  const rounds: ValidationRound[] = [];
+  let script = '';
+  let split: string[] = [];
+  let receipt: GGBReceipt = emptyReceipt();
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const raw = await makeOpenAIChatRequest(messages, config);
+    script = extractScript(raw);
+    split = splitCommands(script);
+
+    const target = opts?.buildFull ? opts.buildFull(split) : script;
+    try {
+      receipt = await validateScript(target);
+    } catch (error) {
+      console.error('GeoGebra 校验器不可用:', error);
+      return { script: split, receipt, report: unavailableReport(attempt, rounds) };
+    }
+
+    rounds.push({
+      attempt,
+      ok: receipt.ok,
+      commands: split,
+      errors: receipt.errors,
+    });
+
+    if (receipt.ok) {
+      return { script: split, receipt, report: finishReport(receipt, rounds) };
+    }
+    if (attempt < MAX_ATTEMPTS) {
+      messages.push({ role: 'assistant', content: script });
+      messages.push({ role: 'user', content: repairPrompt(script, receipt) });
+    }
+  }
+
+  return { script: split, receipt, report: finishReport(receipt, rounds) };
+}
+
+/** Pull the instruction script out of whatever the model actually returned. */
+function extractScript(raw: string): string {
+  let text = raw.trim();
+
+  const fence = text.match(/^```[^\n]*\n([\s\S]*?)\n```$/);
+  if (fence) text = fence[1].trim();
+
+  try {
+    const obj = JSON.parse(text) as Record<string, unknown>;
+    if (obj && typeof obj === 'object') {
+      for (const key of ['script', 'commands', 'code']) {
+        const value = obj[key];
+        if (typeof value === 'string' && value.trim()) return value.trim();
+        if (Array.isArray(value)) {
+          const joined = value.filter((v): v is string => typeof v === 'string').join('\n').trim();
+          if (joined) return joined;
+        }
+      }
+    }
+  } catch {
+    // Not JSON — treat the whole reply as the script.
+  }
+
+  return text;
+}
+
+function splitCommands(script: string): string[] {
+  return script
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('#') && !line.startsWith('//'));
+}
+
+function repairPrompt(script: string, receipt: GGBReceipt): string {
+  return [
+    '你上一版脚本没有通过 GeoGebra 指令校验器 ggbcheck 的检查。',
+    '',
+    '上一版脚本：',
+    '<<<',
+    script,
+    '>>>',
+    '',
+    '校验器诊断（逐条）：',
+    formatProblems(receipt.errors),
+    '',
+    '请根据诊断修正，重新输出完整的指令脚本。注意：',
+    '- 修正全部诊断列出的问题，不要只改其中一条。',
+    '- 输出完整脚本，不要只输出修改过的行。',
+    '- 仍然只输出指令，不要解释、不要代码围栏。',
+  ].join('\n');
+}
+
+function finishReport(receipt: GGBReceipt, rounds: ValidationRound[]): ValidationReport {
+  return {
+    ok: receipt.ok,
+    attempts: rounds.length,
+    errors: receipt.errors,
+    executable: receipt.executable,
+    rounds,
+    unavailable: false,
+  };
+}
+
+function unavailableReport(attempt: number, rounds: ValidationRound[]): ValidationReport {
+  return {
+    ok: false,
+    attempts: attempt,
+    errors: [],
+    executable: [],
+    rounds,
+    unavailable: true,
+  };
+}
+
+function emptyReceipt(): GGBReceipt {
+  return {
+    ok: false,
+    errors: [],
+    warnings: [],
+    executable: [],
+    kinds: {},
+    sourceIn: 'text',
+  };
 }

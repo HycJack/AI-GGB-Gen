@@ -1,7 +1,20 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Pause, Save, RotateCcw, FileText, Wand2, X, Loader2 } from 'lucide-react';
+import {
+  Play,
+  Pause,
+  Save,
+  RotateCcw,
+  FileText,
+  Wand2,
+  X,
+  Loader2,
+  ShieldCheck,
+  CheckCircle2,
+  XCircle,
+} from 'lucide-react';
 import { cn } from '../lib/utils';
 import { OpenAIConfig, modifyGeoGebraCommands } from '../lib/gemini';
+import { formatProblems, validateScript, type GGBReceipt } from '../lib/ggbValidate';
 
 interface ScriptEditorProps {
   initialCode: string[];
@@ -24,7 +37,7 @@ export default function ScriptEditor({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentLine, setCurrentLine] = useState(-1);
   const [isDirty, setIsDirty] = useState(false);
-  
+
   // AI Modification State
   const [selectionRange, setSelectionRange] = useState<{start: number, end: number} | null>(null);
   const [showAiInput, setShowAiInput] = useState(false);
@@ -33,9 +46,41 @@ export default function ScriptEditor({
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lineNumbersRef = useRef<HTMLDivElement>(null);
-  const executionTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const executionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const lastSavedCodeRef = useRef(initialCode.join('\n'));
+
+  // Validation state
+  const [receipt, setReceipt] = useState<GGBReceipt | null>(null);
+  const [isChecking, setIsChecking] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
+  const [validatorUnavailable, setValidatorUnavailable] = useState(false);
+
+  /** Validate the given script text against ggbcheck. */
+  const validateCode = useCallback(async (text: string) => {
+    const target = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line !== '' && !line.startsWith('#') && !line.startsWith('//'))
+      .join('\n');
+
+    if (target === '') {
+      setReceipt(null);
+      setValidatorUnavailable(false);
+      return;
+    }
+
+    setIsChecking(true);
+    try {
+      setReceipt(await validateScript(target));
+      setValidatorUnavailable(false);
+    } catch (error) {
+      console.error('GeoGebra 校验器不可用:', error);
+      setValidatorUnavailable(true);
+    } finally {
+      setIsChecking(false);
+    }
+  }, []);
 
   // Sync with external changes (e.g. AI generation or loaded session)
   useEffect(() => {
@@ -44,22 +89,29 @@ export default function ScriptEditor({
       setCode(newCode);
       lastSavedCodeRef.current = newCode;
       setIsDirty(false);
+      void validateCode(newCode);
     }
-  }, [initialCode]);
+  }, [initialCode, validateCode]);
 
-  // Debounced Save
+  // Always read the newest onSave: the parent recreates this callback on
+  // unrelated re-renders, and keying the debounce on it would reset the timer.
+  const onSaveRef = useRef(onSave);
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (isDirty) {
-        const commands = code.split('\n').filter(line => line.trim() !== '');
-        onSave(commands);
-        lastSavedCodeRef.current = commands.join('\n'); // Mark this version as "ours"
-        setIsDirty(false);
-      }
-    }, 1000); // 1 second debounce
+    onSaveRef.current = onSave;
+  }, [onSave]);
 
+  // Debounced save — keyed only on local edits.
+  useEffect(() => {
+    if (!isDirty) return;
+    const timer = setTimeout(() => {
+      const commands = code.split('\n').filter((line) => line.trim() !== '');
+      onSaveRef.current(commands);
+      lastSavedCodeRef.current = commands.join('\n'); // Mark this version as "ours"
+      setIsDirty(false);
+      void validateCode(code);
+    }, 1000);
     return () => clearTimeout(timer);
-  }, [code, isDirty, onSave]);
+  }, [code, isDirty, validateCode]);
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setCode(e.target.value);
@@ -68,17 +120,11 @@ export default function ScriptEditor({
 
   const handleSelect = (e: React.SyntheticEvent<HTMLTextAreaElement>) => {
     const target = e.currentTarget;
-    if (target.selectionStart !== target.selectionEnd) {
-      setSelectionRange({ start: target.selectionStart, end: target.selectionEnd });
-    } else {
-      setSelectionRange(null);
-      if (!showAiInput) {
-        // Only hide if we aren't already typing in the AI box
-        // Actually, we might want to keep the box open if the user is just clicking around?
-        // But usually clicking away clears selection.
-        // Let's keep it simple: clear selection = hide button (but maybe keep modal if open?)
-      }
-    }
+    setSelectionRange(
+      target.selectionStart !== target.selectionEnd
+        ? { start: target.selectionStart, end: target.selectionEnd }
+        : null
+    );
   };
 
   const handleScroll = () => {
@@ -103,8 +149,8 @@ export default function ScriptEditor({
     }
 
     setIsPlaying(true);
-    onReset(); 
-    
+    onReset();
+
     const lines = code.split('\n').filter(line => line.trim() !== '');
     let index = 0;
 
@@ -116,10 +162,10 @@ export default function ScriptEditor({
 
       setCurrentLine(index);
       const cmd = lines[index];
-      onExecute([cmd]); 
+      onExecute([cmd]);
 
       index++;
-      executionTimerRef.current = setTimeout(executeNext, 800); 
+      executionTimerRef.current = setTimeout(executeNext, 800);
     };
 
     executeNext();
@@ -140,29 +186,39 @@ export default function ScriptEditor({
     setIsAiProcessing(true);
     try {
       const selectedText = code.substring(selectionRange.start, selectionRange.end);
-      const fullScript = code.split('\n');
-      
-      const newCommands = await modifyGeoGebraCommands(
-        fullScript,
+      const before = code.substring(0, selectionRange.start);
+      const after = code.substring(selectionRange.end);
+
+      // The fragment is validated inside the surrounding script, so references
+      // to objects defined outside the selection do not look undefined.
+      const { fragment, validation } = await modifyGeoGebraCommands(
+        before,
+        after,
         selectedText,
         aiInstruction,
         geminiConfig
       );
 
-      const newText = newCommands.join('\n');
-      
-      // Replace text
-      const before = code.substring(0, selectionRange.start);
-      const after = code.substring(selectionRange.end);
+      const newText = fragment.join('\n');
       const updatedCode = before + newText + after;
       
       setCode(updatedCode);
+
+      // The replacement is applied either way, but tell the user what the
+      // validator still finds wrong instead of silently writing a broken script.
+      if (!validation.ok && !validation.unavailable) {
+        alert(
+          `AI 已应用修改，但修改后的脚本未通过校验（共尝试 ${validation.attempts} 次）：\n\n` +
+            formatProblems(validation.errors)
+        );
+      }
       
-      // Immediately save the updated code
-      const commands = updatedCode.split('\n').filter(line => line.trim() !== '');
+      // Save immediately — the debounce effect below no-ops because isDirty is false.
+      const commands = updatedCode.split('\n').filter((line) => line.trim() !== '');
       onSave(commands);
-      lastSavedCodeRef.current = updatedCode;
+      lastSavedCodeRef.current = commands.join('\n');
       setIsDirty(false);
+      void validateCode(updatedCode);
       
       setShowAiInput(false);
       setAiInstruction('');
@@ -218,6 +274,18 @@ export default function ScriptEditor({
             批量执行
           </button>
           <button
+            onClick={() => void validateCode(code)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium bg-violet-100 text-violet-700 hover:bg-violet-200 transition-colors"
+            title="用 ggbcheck 校验当前脚本（签名/依赖/退化）"
+          >
+            {isChecking ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <ShieldCheck className="w-4 h-4" />
+            )}
+            校验
+          </button>
+          <button
             onClick={() => {
               stopExecution();
               onReset();
@@ -230,9 +298,49 @@ export default function ScriptEditor({
         </div>
       </div>
 
+      {/* Validation status */}
+      {(isChecking || receipt || validatorUnavailable) && (
+        <div className="shrink-0 border-b border-gray-200 bg-gray-50">
+          {validatorUnavailable ? (
+            <div className="px-4 py-1.5 text-xs text-amber-700">
+              ⚠️ 校验器不可用，本次没有做指令校验
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setShowDetails((v) => !v)}
+              className="w-full flex items-center justify-between gap-2 px-4 py-1.5 text-xs text-left hover:bg-gray-100 transition-colors"
+              title={receipt && !receipt.ok ? '点击展开诊断详情' : '点击收起'}
+            >
+              {receipt ? (
+                receipt.ok ? (
+                  <span className="flex items-center gap-1.5 text-green-700 font-medium">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    校验通过 · {receipt.executable.length} 个对象
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1.5 text-red-700 font-medium">
+                    <XCircle className="w-3.5 h-3.5 shrink-0" />
+                    {receipt.errors.length} 处问题
+                  </span>
+                )
+              ) : (
+                <span className="text-gray-500">校验中…</span>
+              )}
+              <span className="text-gray-400 shrink-0">{showDetails ? '收起' : '详情'}</span>
+            </button>
+          )}
+          {showDetails && receipt && !receipt.ok && (
+            <div className="px-4 pb-2 text-xs text-gray-600 whitespace-pre-wrap break-words">
+              {formatProblems(receipt.errors)}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* AI Modification Bar */}
       {showAiInput && (
-        <div className="absolute top-[60px] left-4 right-4 z-20 bg-white border border-blue-200 shadow-lg rounded-lg p-3 animate-in fade-in slide-in-from-top-2">
+        <div className="absolute top-[60px] left-4 right-4 z-20 bg-white border border-blue-200 shadow-lg rounded-lg p-3">
           <div className="flex items-center gap-2 mb-2">
             <Wand2 className="w-4 h-4 text-purple-600" />
             <span className="text-sm font-medium text-gray-700">AI 修改选中指令</span>
@@ -299,7 +407,7 @@ export default function ScriptEditor({
         {selectionRange && !showAiInput && (
           <button
             onClick={() => setShowAiInput(true)}
-            className="absolute top-4 right-8 bg-white text-purple-600 border border-purple-200 shadow-md px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 hover:bg-purple-50 transition-all animate-in fade-in zoom-in duration-200 z-10"
+            className="absolute top-4 right-8 bg-white text-purple-600 border border-purple-200 shadow-md px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 hover:bg-purple-50 transition-all z-10"
           >
             <Wand2 className="w-3 h-3" />
             AI 修改

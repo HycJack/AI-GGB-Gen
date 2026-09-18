@@ -1,7 +1,7 @@
-import React from 'react';
 import { X, Clock, Trash2, MessageSquare } from 'lucide-react';
-import { SavedSession, deleteSession } from '../lib/storage';
+import type { SavedSession } from '../lib/storage';
 import { cn } from '../lib/utils';
+import { useEscapeClose } from '../hooks/useEscapeClose';
 
 interface HistoryModalProps {
   isOpen: boolean;
@@ -11,18 +11,26 @@ interface HistoryModalProps {
   onDeleteSession: (id: string) => void;
 }
 
-export default function HistoryModal({ 
-  isOpen, 
-  onClose, 
-  onSelectSession, 
+export default function HistoryModal({
+  isOpen,
+  onClose,
+  onSelectSession,
   sessions,
-  onDeleteSession 
+  onDeleteSession,
 }: HistoryModalProps) {
+  useEscapeClose(isOpen, onClose);
+
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="历史记录"
+        className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50 shrink-0">
           <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
             <Clock className="w-5 h-5 text-blue-600" />

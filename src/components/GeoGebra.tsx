@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from 'react';
+import { useCallback, useEffect, useRef, useState, useImperativeHandle, forwardRef } from 'react';
+import { AlertTriangle } from 'lucide-react';
+import type { Perspective } from '../lib/gemini';
 
 declare global {
   interface Window {
@@ -7,301 +9,297 @@ declare global {
   }
 }
 
+/**
+ * Discrete-mathematics commands are lazy-loaded by the web3d applet through
+ * GWT.runAsync. The first synchronous evalCommand() call throws a
+ * "command not loaded" error, and that failed call is what triggers the load —
+ * so the fix is to retry, not to avoid the command. Waiting these gaps between
+ * attempts costs a few hundred ms only for the commands that actually need it.
+ */
+const LAZY_LOAD_RETRIES = [400, 900, 1500];
+
+function isLazyLoadError(error: unknown): boolean {
+  const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  return /not\s*loaded|commandnotloaded|runasync|not\s*yet/i.test(text);
+}
+
 interface GeoGebraProps {
   initialCommands?: string[];
   onUpdate?: (objectName: string) => void;
   onAdd?: (objectName: string) => void;
   onRemove?: (objectName: string) => void;
-  perspective?: string; // "1" for Algebra & Graphics, "2" for Geometry, "5" for 3D Graphics
+  perspective?: Perspective; // "1" Algebra & Graphics, "2" Geometry, "5" 3D Graphics
 }
 
 export interface GeoGebraRef {
-  executeCommand: (cmd: string) => void;
-  getCommandString: (objName?: string) => string | string[];
+  /**
+   * Returns false instead of throwing when the applet is not ready or the
+   * command fails. A command whose module is still lazy-loading is retried
+   * before giving up, so this only rejects once the module has arrived.
+   */
+  executeCommand: (cmd: string) => Promise<boolean>;
+  evalCommand: (cmd: string) => Promise<boolean>;
   getAllObjectNames: () => string[];
-  getObjectNumber: () => number;
-  getObjectName: (i: number) => string;
-  getValueString: (objName: string) => string;
-  evalCommand: (cmd: string) => void;
-  setSize: (width: number, height: number) => void;
-  setPerspective: (perspective: string) => void;
+  setPerspective: (perspective: Perspective) => void;
   reset: () => void;
   downloadGGB: () => void;
   getPNGBase64: (callback: (data: string) => void) => void;
   deleteObject: (objName: string) => void;
 }
 
-const GeoGebra = forwardRef<GeoGebraRef, GeoGebraProps>(({ 
-  initialCommands = [], 
-  onUpdate,
-  onAdd,
-  onRemove,
-  perspective = "2" // Default to Geometry
-}, ref) => {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const appletRef = useRef<any>(null);
-  const [isReady, setIsReady] = useState(false);
-  
-  // Generate a unique ID for the applet container to avoid React reconciliation issues
-  const appletId = useRef(`ggb-applet-${Math.random().toString(36).substr(2, 9)}`);
+const GEOGEBRA_SCRIPT_URL = 'https://www.geogebra.org/apps/deployggb.js';
+const SCRIPT_TIMEOUT_MS = 20_000;
 
-  useImperativeHandle(ref, () => ({
-    executeCommand: (cmd: string) => {
-      if (appletRef.current && isReady) {
-        try {
-          appletRef.current.evalCommand(cmd);
-        } catch (error) {
-          console.error('GeoGebra command execution error:', error);
-          alert(`命令执行失败: ${cmd}\n错误信息: ${error instanceof Error ? error.message : String(error)}`);
+const GeoGebra = forwardRef<GeoGebraRef, GeoGebraProps>(
+  (
+    {
+      initialCommands = [],
+      onUpdate,
+      onAdd,
+      onRemove,
+      perspective = '2',
+    },
+    ref
+  ) => {
+    const containerRef = useRef<HTMLDivElement>(null);
+    const appletRef = useRef<any>(null);
+    const [isReady, setIsReady] = useState(false);
+    const [scriptError, setScriptError] = useState<string | null>(null);
+
+    // Stable unique id so React reconciliation never re-creates the applet div.
+    const appletId = useRef(`ggb-applet-${Math.random().toString(36).slice(2, 11)}`);
+
+    const runCommand = useCallback(async (cmd: string): Promise<boolean> => {
+      const applet = appletRef.current;
+      if (!applet) return false;
+      try {
+        applet.evalCommand(cmd);
+        return true;
+      } catch (error) {
+        if (!isLazyLoadError(error)) {
+          console.error('GeoGebra command execution error:', cmd, error);
+          return false;
         }
-      } else {
-        console.warn('GeoGebra applet not ready yet, command queued:', cmd);
-        alert('GeoGebra 还未加载完成，请稍后再试');
-      }
-    },
-    getCommandString: (objName?: string) => {
-      if (!appletRef.current) return [];
-      if (objName) return appletRef.current.getCommandString(objName);
-      
-      const names = appletRef.current.getAllObjectNames();
-      const commands = [];
-      for (const name of names) {
-        const cmd = appletRef.current.getCommandString(name);
-        if (cmd) {
-          commands.push(`${name} = ${cmd}`);
-        } else {
-           // For free objects or points, get value string or definition
-           const val = appletRef.current.getValueString(name);
-           commands.push(val);
-        }
-      }
-      return commands;
-    },
-    getAllObjectNames: () => {
-      return appletRef.current ? appletRef.current.getAllObjectNames() : [];
-    },
-    getObjectNumber: () => appletRef.current?.getObjectNumber() || 0,
-    getObjectName: (i: number) => appletRef.current?.getObjectName(i) || "",
-    getValueString: (objName: string) => appletRef.current?.getValueString(objName) || "",
-    evalCommand: (cmd: string) => {
-      if (appletRef.current && isReady) {
-        try {
-          appletRef.current.evalCommand(cmd);
-        } catch (error) {
-          console.error('GeoGebra command execution error:', error);
-          alert(`命令执行失败: ${cmd}\n错误信息: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      } else {
-        console.warn('GeoGebra applet not ready yet, command queued:', cmd);
-        alert('GeoGebra 还未加载完成，请稍后再试');
-      }
-    },
-    setSize: (width: number, height: number) => {
-      if (appletRef.current) {
-        appletRef.current.setSize(width, height);
-      }
-    },
-    setPerspective: (p: string) => {
-      if (appletRef.current) {
-        appletRef.current.setPerspective(p);
-      }
-    },
-    reset: () => {
-      if (appletRef.current) {
-        const objNames = appletRef.current.getAllObjectNames();
-          objNames.forEach((name: string) => {
-            try {
-              appletRef.current.deleteObject(name);
-            } catch (e) {
-              // Ignore errors for objects that can't be deleted
+        // The first call failed only because the module had not arrived yet.
+        for (const delay of LAZY_LOAD_RETRIES) {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          try {
+            applet.evalCommand(cmd);
+            return true;
+          } catch (error2) {
+            if (!isLazyLoadError(error2)) {
+              console.error('GeoGebra command execution error:', cmd, error2);
+              return false;
             }
-          });
-        if (perspective === "G" || perspective === "5") {
-          appletRef.current.setPerspective(perspective);
+          }
         }
-        appletRef.current.reset();
+        console.error('GeoGebra lazy-loaded command never became available:', cmd, error);
+        return false;
       }
-    },
-    downloadGGB: () => {
-      if (appletRef.current) {
-        // getBase64(callback) returns the .ggb file as base64 string
-        // Note: The documentation says getBase64() returns the .ggb file, 
-        // while getPNGBase64() returns the PNG image.
-        appletRef.current.getBase64((base64: string) => {
-          const link = document.createElement('a');
-          link.href = 'data:application/vnd.geogebra.file;base64,' + base64;
-          link.download = `geogebra-export-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.ggb`;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
+    }, []);
+
+    const reset = useCallback(() => {
+      if (!appletRef.current) return;
+      const applet = appletRef.current;
+
+      try {
+        const objNames = applet.getAllObjectNames();
+        objNames.forEach((name: string) => {
+          try {
+            applet.deleteObject(name);
+          } catch {
+            // Some objects (e.g. locked or system objects) cannot be deleted.
+          }
         });
+      } catch (error) {
+        console.error('GeoGebra reset error:', error);
       }
-    },
-    getPNGBase64: (callback: (data: string) => void) => {
-      if (appletRef.current) {
-        // getPNGBase64(exportScale, transparent, dpi, copyToClipboard, callback)
-        // We use a scale of 1, transparent false, default dpi, false for clipboard
-        appletRef.current.getPNGBase64(1, false, 300, false, callback);
-      }
-    },
-    deleteObject: (objName: string) => {
-      if (appletRef.current) {
-        try {
-          appletRef.current.deleteObject(objName);
-        } catch (error) {
-          console.error('GeoGebra deleteObject error:', error);
+
+      applet.reset();
+      // Reset can revert view settings; re-apply the 3D perspective afterwards.
+      if (perspective === '5') applet.setPerspective(perspective);
+    }, [perspective]);
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        executeCommand: runCommand,
+        evalCommand: runCommand,
+        getAllObjectNames: () => appletRef.current?.getAllObjectNames() ?? [],
+        setPerspective: (p: Perspective) => {
+          if (appletRef.current) appletRef.current.setPerspective(p);
+        },
+        reset,
+        downloadGGB: () => {
+          if (!appletRef.current) return;
+          // getBase64() returns the .ggb file; getPNGBase64() returns the PNG image.
+          appletRef.current.getBase64((base64: string) => {
+            const link = document.createElement('a');
+            link.href = `data:application/vnd.geogebra.file;base64,${base64}`;
+            link.download = `geogebra-export-${new Date()
+              .toISOString()
+              .slice(0, 19)
+              .replace(/:/g, '-')}.ggb`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+          });
+        },
+        getPNGBase64: (callback: (data: string) => void) => {
+          if (!appletRef.current) return;
+          appletRef.current.getPNGBase64(1, false, 300, false, callback);
+        },
+        deleteObject: (objName: string) => {
+          if (!appletRef.current) return;
+          try {
+            appletRef.current.deleteObject(objName);
+          } catch (error) {
+            console.error('GeoGebra deleteObject error:', objName, error);
+          }
+        },
+      }),
+      [runCommand, reset]
+    );
+
+    useEffect(() => {
+      let scriptLoading = false;
+
+      const initApplet = () => {
+        if (!containerRef.current) return;
+        // Guard against double injection (e.g. StrictMode effect re-run).
+        if (document.getElementById(appletId.current)?.getAttribute('data-injected') === 'yes') {
+          return;
         }
-      }
-    }
-  }));
 
-  useEffect(() => {
-    // If applet is already ready, just update perspective
-    if (isReady && appletRef.current) {
-      appletRef.current.setPerspective(perspective);
-      return;
-    }
+        const params = {
+          appName: 'classic', // classic supports all perspectives
+          width: containerRef.current.clientWidth,
+          height: containerRef.current.clientHeight,
+          showToolBar: true,
+          showAlgebraInput: false,
+          showMenuBar: false,
+          perspective,
+          allowStyleBar: false,
+          showResetIcon: true,
+          enableLabelDrags: false,
+          enableShiftDragZoom: true,
+          enableRightClick: true,
+          capturingThreshold: null,
+          showLogging: false,
+          useBrowserForJS: false,
+          appletOnLoad: (api: any) => {
+            appletRef.current = api;
+            setScriptError(null);
 
-    const loadGeoGebra = () => {
-      if (window.GGBApplet) {
-        initApplet();
-      } else {
-        const script = document.createElement('script');
-        script.src = 'https://www.geogebra.org/apps/deployggb.js';
-        script.onload = () => initApplet();
-        document.body.appendChild(script);
-      }
-    };
+            if (onUpdate) api.registerUpdateListener(onUpdate);
+            if (onAdd) api.registerAddListener(onAdd);
+            if (onRemove) api.registerRemoveListener(onRemove);
 
-    const initApplet = () => {
-      if (!containerRef.current) return;
-      
-      // Check if already injected
-      const appletDiv = document.getElementById(appletId.current);
-      if (!appletDiv || appletDiv.getAttribute("data-injected") === "yes") return;
+            // Give the applet a moment to fully initialize before running commands.
+            setTimeout(() => {
+              setIsReady(true);
+              initialCommands.forEach((cmd) => runCommand(cmd));
+            }, 100);
+          },
+        };
 
-      const params = {
-        "appName": "classic", // Use classic to support all perspectives
-        "width": containerRef.current.clientWidth,
-        "height": containerRef.current.clientHeight,
-        "showToolBar": true,
-        "showAlgebraInput": false,
-        "showMenuBar": false,
-        "perspective": perspective,
-        "allowStyleBar": false,
-        "showResetIcon": true,
-        "enableLabelDrags": false,
-        "enableShiftDragZoom": true,
-        "enableRightClick": true,
-        "capturingThreshold": null,
-        "showLogging": false,
-        "useBrowserForJS": false,
-        "appletOnLoad": (api: any) => {
-          appletRef.current = api;
-          
-          // Register listeners
-          if (onUpdate) api.registerUpdateListener(onUpdate);
-          if (onAdd) api.registerAddListener(onAdd);
-          if (onRemove) api.registerRemoveListener(onRemove);
-
-          // Wait a bit for the applet to fully initialize before executing commands
-          setTimeout(() => {
-            setIsReady(true);
-            
-            // Execute initial commands
-            if (initialCommands.length > 0) {
-              initialCommands.forEach(cmd => {
-                try {
-                  api.evalCommand(cmd);
-                } catch (error) {
-                  console.error('GeoGebra command execution error:', error);
-                  alert(`命令执行失败: ${cmd}\n错误信息: ${error instanceof Error ? error.message : String(error)}`);
-                }
-              });
-            }
-          }, 100);
-        }
+        document.getElementById(appletId.current)?.setAttribute('data-injected', 'yes');
+        // @ts-ignore - GGBApplet is injected by deployggb.js at runtime
+        const applet = new window.GGBApplet(params, true);
+        applet.inject(appletId.current);
       };
 
-      appletDiv.setAttribute("data-injected", "yes");
-      // @ts-ignore
-      const applet = new window.GGBApplet(params, true);
-      applet.inject(appletId.current);
-    };
-
-    loadGeoGebra();
-
-  }, []); // Only run once on mount to load script
-
-  // Handle perspective changes
-  useEffect(() => {
-    if (isReady && appletRef.current) {
-      appletRef.current.setPerspective(perspective);
-    }
-  }, [perspective, isReady]);
-
-  // Handle resize using ResizeObserver on the container
-  useEffect(() => {
-    if (!containerRef.current) return;
-
-    const resizeObserver = new ResizeObserver((entries) => {
-      if (!appletRef.current) return;
-
-      for (const entry of entries) {
-        // Try to use contentBoxSize for more precise sub-pixel values if available
-        let width, height;
-        if (entry.contentBoxSize) {
-          // contentBoxSize is an array
-          const contentBox = Array.isArray(entry.contentBoxSize) ? entry.contentBoxSize[0] : entry.contentBoxSize;
-          width = contentBox.inlineSize;
-          height = contentBox.blockSize;
-        } else {
-          // Fallback to contentRect
-          width = entry.contentRect.width;
-          height = entry.contentRect.height;
+      const loadGeoGebra = () => {
+        if (window.GGBApplet) {
+          initApplet();
+          return;
         }
-        
-        if (width > 0 && height > 0) {
-          appletRef.current.setSize(width, height);
+        if (scriptLoading) return;
+        scriptLoading = true;
+
+        const script = document.createElement('script');
+        script.src = GEOGEBRA_SCRIPT_URL;
+        script.onload = () => {
+          scriptLoading = false;
+          initApplet();
+        };
+        script.onerror = () => {
+          scriptLoading = false;
+          setScriptError('GeoGebra 脚本加载失败，请检查网络连接后重试');
+        };
+        document.body.appendChild(script);
+      };
+
+      const timeoutId = setTimeout(() => {
+        if (!appletRef.current) {
+          setScriptError('GeoGebra 加载超时，请检查网络连接后重试');
         }
+      }, SCRIPT_TIMEOUT_MS);
+
+      loadGeoGebra();
+
+      return () => clearTimeout(timeoutId);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []); // Load the script and the applet exactly once.
+
+    // Handle perspective changes after the applet is ready.
+    useEffect(() => {
+      if (isReady && appletRef.current) {
+        appletRef.current.setPerspective(perspective);
       }
-    });
+    }, [perspective, isReady]);
 
-    resizeObserver.observe(containerRef.current);
+    // Resize the applet to match its container.
+    useEffect(() => {
+      if (!containerRef.current) return;
 
-    return () => {
-      resizeObserver.disconnect();
-    };
-  }, [isReady]); // Re-bind if isReady changes (though appletRef is stable)
-
-  // Handle initial commands - only on mount/ready
-  useEffect(() => {
-    if (isReady && appletRef.current && initialCommands.length > 0) {
-      // Only execute if we haven't executed these specific commands yet?
-      // Or just run once when ready.
-      // We'll rely on parent to call executeCommand for updates.
-      appletRef.current.reset();
-      initialCommands.forEach(cmd => {
-        try {
-          appletRef.current.evalCommand(cmd);
-        } catch (error) {
-          console.error('GeoGebra command execution error:', error);
-          alert(`命令执行失败: ${cmd}\n错误信息: ${error instanceof Error ? error.message : String(error)}`);
+      const resizeObserver = new ResizeObserver((entries) => {
+        if (!appletRef.current) return;
+        for (const entry of entries) {
+          let width: number;
+          let height: number;
+          if (entry.contentBoxSize) {
+            const box = Array.isArray(entry.contentBoxSize)
+              ? entry.contentBoxSize[0]
+              : entry.contentBoxSize;
+            width = box.inlineSize;
+            height = box.blockSize;
+          } else {
+            width = entry.contentRect.width;
+            height = entry.contentRect.height;
+          }
+          if (width > 0 && height > 0) {
+            appletRef.current.setSize(width, height);
+          }
         }
       });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isReady]); // Only run when applet becomes ready, not when commands change later
 
-  return (
-    <div 
-      ref={containerRef} 
-      className="w-full h-full border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white relative"
-    >
-      <div id={appletId.current} className="w-full h-full" />
-    </div>
-  );
-});
+      resizeObserver.observe(containerRef.current);
+      return () => resizeObserver.disconnect();
+    }, [isReady]);
+
+    return (
+      <div
+        ref={containerRef}
+        className="w-full h-full border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white relative"
+      >
+        <div id={appletId.current} className="w-full h-full" />
+        {scriptError && (
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white text-center px-6">
+            <AlertTriangle className="w-9 h-9 text-red-400" />
+            <p className="text-sm text-gray-500">{scriptError}</p>
+            <button
+              onClick={() => window.location.reload()}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+            >
+              刷新重试
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+);
 
 GeoGebra.displayName = 'GeoGebra';
 
